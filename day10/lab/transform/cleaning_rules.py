@@ -201,7 +201,16 @@ def clean_rows(
             quarantine.append({**raw, "reason": "missing_chunk_text"})
             continue
 
-        if _is_low_text_quality(text):
+        fixed_text = text
+        if apply_refund_window_fix and doc_id == "policy_refund_v4":
+            if "14 ngày làm việc" in fixed_text:
+                fixed_text = fixed_text.replace(
+                    "14 ngày làm việc",
+                    "7 ngày làm việc",
+                )
+                fixed_text += " [cleaned: stale_refund_window]"
+
+        if _is_low_text_quality(fixed_text):
             quarantine.append(
                 {
                     **raw,
@@ -211,20 +220,11 @@ def clean_rows(
             )
             continue
 
-        key = (doc_id, eff_norm, _norm_text(text))
+        key = (doc_id, eff_norm, _norm_text(fixed_text))
         if key in seen_keys:
             quarantine.append({**raw, "reason": "duplicate_chunk_text"})
             continue
         seen_keys.add(key)
-
-        fixed_text = text
-        if apply_refund_window_fix and doc_id == "policy_refund_v4":
-            if "14 ngày làm việc" in fixed_text:
-                fixed_text = fixed_text.replace(
-                    "14 ngày làm việc",
-                    "7 ngày làm việc",
-                )
-                fixed_text += " [cleaned: stale_refund_window]"
 
         cleaned.append(
             {
