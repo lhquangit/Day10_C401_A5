@@ -40,20 +40,75 @@ def check_manifest_freshness(
     """
     now = now or datetime.now(timezone.utc)
     if not manifest_path.is_file():
-        return "FAIL", {"reason": "manifest_missing", "path": str(manifest_path)}
+        return (
+            "FAIL",
+            {
+                "checked_boundary": "unavailable",
+                "timestamp_used": "",
+                "age_hours": None,
+                "sla_hours": sla_hours,
+                "status_reason": "manifest_missing",
+                "reason": "manifest_missing",
+                "path": str(manifest_path),
+            },
+        )
 
     data: Dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
-    ts_raw = data.get("latest_exported_at") or data.get("run_timestamp")
+    manifest_status = str(data.get("status") or "")
+    manifest_freshness_status = str(data.get("freshness_status") or "")
+
+    # Failed or interrupted runs should not be treated as true freshness pass/fail.
+    if manifest_freshness_status.startswith("not_checked") or manifest_status in {"failed_validation", "embed_failed"}:
+        status_reason = manifest_freshness_status or manifest_status or "freshness_not_checked"
+        return (
+            "WARN",
+            {
+                "checked_boundary": "unavailable",
+                "timestamp_used": "",
+                "age_hours": None,
+                "sla_hours": sla_hours,
+                "status_reason": status_reason,
+                "reason": status_reason,
+                "manifest_status": manifest_status,
+            },
+        )
+
+    ts_raw = data.get("latest_exported_at")
+    checked_boundary = "latest_exported_at"
+    fallback_used = False
+    if not ts_raw:
+        ts_raw = data.get("run_timestamp")
+        checked_boundary = "run_timestamp_fallback"
+        fallback_used = True
+
     dt = parse_iso(str(ts_raw)) if ts_raw else None
     if dt is None:
-        return "WARN", {"reason": "no_timestamp_in_manifest", "manifest": data}
+        status_reason = "timestamp_missing" if not ts_raw else "timestamp_parse_failed"
+        return (
+            "WARN",
+            {
+                "checked_boundary": checked_boundary,
+                "timestamp_used": str(ts_raw or ""),
+                "age_hours": None,
+                "sla_hours": sla_hours,
+                "status_reason": status_reason,
+                "reason": status_reason,
+                "manifest_status": manifest_status,
+                "fallback_used": fallback_used,
+            },
+        )
 
     age_hours = (now - dt).total_seconds() / 3600.0
     detail = {
-        "latest_exported_at": ts_raw,
+        "checked_boundary": checked_boundary,
+        "timestamp_used": str(ts_raw),
         "age_hours": round(age_hours, 3),
         "sla_hours": sla_hours,
+        "manifest_status": manifest_status,
+        "fallback_used": fallback_used,
     }
+    if age_hours < 0:
+        return "WARN", {**detail, "status_reason": "timestamp_in_future", "reason": "timestamp_in_future"}
     if age_hours <= sla_hours:
-        return "PASS", detail
-    return "FAIL", {**detail, "reason": "freshness_sla_exceeded"}
+        return "PASS", {**detail, "status_reason": "within_sla", "reason": "within_sla"}
+    return "FAIL", {**detail, "status_reason": "freshness_sla_exceeded", "reason": "freshness_sla_exceeded"}
