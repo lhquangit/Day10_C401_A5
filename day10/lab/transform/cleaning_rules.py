@@ -26,11 +26,17 @@ ALLOWED_DOC_IDS = frozenset(
 
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DMY_SLASH = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
-_EXPORTED_AT_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z)?$")
 _NON_CONTENT = re.compile(r"[^0-9A-Za-zÀ-ỹ]+")
 _HR_STALE_ANNUAL_MARKERS = (
     "10 ngày phép năm",
     "10 ngay phep nam",
+)
+_STALE_SOURCE_MARKERS = (
+    "policy-v3",
+    "lỗi migration",
+    "loi migration",
+    "bản hr 2025",
+    "ban hr 2025",
 )
 
 
@@ -39,9 +45,10 @@ def _norm_text(s: str) -> str:
     return " ".join(s.strip().split()).lower()
 
 
-def _stable_chunk_id(doc_id: str, chunk_text: str, seq: int) -> str:
-    h = hashlib.sha256(f"{doc_id}|{chunk_text}|{seq}".encode("utf-8")).hexdigest()[:16]
-    return f"{doc_id}_{seq}_{h}"
+def _stable_chunk_id(doc_id: str, effective_date: str, chunk_text: str) -> str:
+    norm = _norm_text(chunk_text)
+    h = hashlib.sha256(f"{doc_id}|{effective_date}|{norm}".encode("utf-8")).hexdigest()[:16]
+    return f"{doc_id}_{effective_date}_{h}"
 
 
 def _normalize_effective_date(raw: str) -> Tuple[str, str]:
@@ -69,31 +76,37 @@ def _normalize_effective_date(raw: str) -> Tuple[str, str]:
     return "", "invalid_effective_date_format"
 
 
-def _parse_exported_at_date(raw: str) -> Tuple[date | None, str]:
+def _parse_exported_at_date(raw: str) -> Tuple[datetime | None, str]:
     s = (raw or "").strip()
     if not s:
         return None, "missing_exported_at"
-    if not _EXPORTED_AT_ISO.match(s):
-        return None, "invalid_exported_at_format"
-    s_for_parse = s[:-1] if s.endswith("Z") else s
+    # fromisoformat hỗ trợ timezone offset (+07:00, +00:00, ...)
+    # Chuẩn ISO dạng Z đổi về +00:00 để parse thống nhất.
+    s_for_parse = s[:-1] + "+00:00" if s.endswith("Z") else s
     try:
-        dt = datetime.strptime(s_for_parse, "%Y-%m-%dT%H:%M:%S")
+        dt = datetime.fromisoformat(s_for_parse)
     except ValueError:
-        return None, "invalid_exported_at_value"
-    return dt.date(), ""
+        return None, "invalid_exported_at_format"
+    return dt, ""
 
 
 def _is_low_text_quality(text: str) -> bool:
     normalized = _NON_CONTENT.sub("", text or "")
-    if len(normalized) < 8:
+    if len(normalized) < 5:
         return True
     letters = sum(1 for ch in normalized if ch.isalpha())
-    return letters < 6
+    # Heuristic mềm hơn: chỉ reject cứng khi hầu như không có chữ.
+    return letters == 0
 
 
 def _has_stale_hr_policy_content(text: str) -> bool:
     key = _norm_text(text)
     return any(marker in key for marker in _HR_STALE_ANNUAL_MARKERS)
+
+
+def _has_stale_source_marker(text: str) -> bool:
+    key = _norm_text(text)
+    return any(marker in key for marker in _STALE_SOURCE_MARKERS)
 
 
 def load_raw_csv(path: Path) -> List[Dict[str, str]]:
@@ -118,17 +131,16 @@ def clean_rows(
     2) Chuẩn hoá effective_date sang YYYY-MM-DD; quarantine nếu không parse được.
     3) Quarantine: chunk hr_leave_policy có effective_date < 2026-01-01 (bản HR cũ / conflict version).
     4) Quarantine: chunk_text rỗng hoặc effective_date rỗng sau chuẩn hoá.
-    5) Loại trùng nội dung chunk_text (giữ bản đầu).
+    5) Loại trùng theo (doc_id + effective_date + normalized chunk_text).
     6) Fix stale refund: policy_refund_v4 chứa '14 ngày làm việc' → 7 ngày.
     7) Quarantine: exported_at phải đúng định dạng ISO datetime.
     8) Quarantine: hr_leave_policy không được chứa marker policy cũ "10 ngày phép năm".
-    9) Quarantine: effective_date không được sau exported_at.
-    10) Quarantine: low text quality (gần như không có nội dung ngôn ngữ).
+    9) Quarantine: stale source marker (policy-v3 / lỗi migration / bản HR 2025...).
+    10) Quarantine: low text quality (chủ yếu ký tự rác, không có chữ).
     """
     quarantine: List[Dict[str, Any]] = []
-    seen_text: set[str] = set()
+    seen_keys: set[tuple[str, str, str]] = set()
     cleaned: List[Dict[str, Any]] = []
-    seq = 0
 
     for raw in rows:
         doc_id = raw.get("doc_id", "")
@@ -151,7 +163,7 @@ def clean_rows(
             quarantine.append({**raw, "reason": eff_err, "effective_date_raw": eff_raw, "metric_impact": "quarantine_records"})
             continue
 
-        exported_date, exported_err = _parse_exported_at_date(exported_at)
+        exported_dt, exported_err = _parse_exported_at_date(exported_at)
         if exported_err:
             quarantine.append({**raw, "reason": exported_err, "metric_impact": "quarantine_records"})
             continue
@@ -175,19 +187,18 @@ def clean_rows(
             )
             continue
 
-        if not text:
-            quarantine.append({**raw, "reason": "missing_chunk_text"})
-            continue
-
-        if exported_date and eff_norm > exported_date.isoformat():
+        if _has_stale_source_marker(text):
             quarantine.append(
                 {
                     **raw,
-                    "reason": "effective_date_after_exported_at",
-                    "effective_date_normalized": eff_norm,
+                    "reason": "stale_source_marker",
                     "metric_impact": "quarantine_records",
                 }
             )
+            continue
+
+        if not text:
+            quarantine.append({**raw, "reason": "missing_chunk_text"})
             continue
 
         if _is_low_text_quality(text):
@@ -200,11 +211,11 @@ def clean_rows(
             )
             continue
 
-        key = _norm_text(text)
-        if key in seen_text:
+        key = (doc_id, eff_norm, _norm_text(text))
+        if key in seen_keys:
             quarantine.append({**raw, "reason": "duplicate_chunk_text"})
             continue
-        seen_text.add(key)
+        seen_keys.add(key)
 
         fixed_text = text
         if apply_refund_window_fix and doc_id == "policy_refund_v4":
@@ -215,14 +226,13 @@ def clean_rows(
                 )
                 fixed_text += " [cleaned: stale_refund_window]"
 
-        seq += 1
         cleaned.append(
             {
-                "chunk_id": _stable_chunk_id(doc_id, fixed_text, seq),
+                "chunk_id": _stable_chunk_id(doc_id, eff_norm, fixed_text),
                 "doc_id": doc_id,
                 "chunk_text": fixed_text,
                 "effective_date": eff_norm,
-                "exported_at": exported_at or "",
+                "exported_at": exported_dt.isoformat() if exported_dt else "",
             }
         )
 
