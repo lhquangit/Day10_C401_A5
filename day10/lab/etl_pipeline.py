@@ -152,10 +152,12 @@ def cmd_embed_internal(cleaned_csv: Path, *, run_id: str, log) -> bool:
     col = client.get_or_create_collection(name=collection_name, embedding_function=emb)
 
     ids = [r["chunk_id"] for r in rows]
+    existing_count = 0
     # Tránh “mồi cũ” trong top-k: xóa id không còn trong cleaned run này (index = snapshot publish).
     try:
         prev = col.get(include=[])
         prev_ids = set(prev.get("ids") or [])
+        existing_count = len(prev_ids)
         drop = sorted(prev_ids - set(ids))
         if drop:
             col.delete(ids=drop)
@@ -173,7 +175,10 @@ def cmd_embed_internal(cleaned_csv: Path, *, run_id: str, log) -> bool:
     ]
     # Idempotent: upsert theo chunk_id
     col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+    final_count = col.count()
+    log(f"embed_existing_count={existing_count}")
     log(f"embed_upsert count={len(ids)} collection={collection_name}")
+    log(f"embed_final_count={final_count}")
     return True
 
 

@@ -42,14 +42,22 @@ def main() -> int:
         return 1
 
     qpath = Path(args.questions)
+    if not qpath.is_file():
+        print(f"questions not found: {qpath}", file=sys.stderr)
+        return 1
+
     qs = json.loads(qpath.read_text(encoding="utf-8"))
     db_path = os.environ.get("CHROMA_DB_PATH", str(ROOT / "chroma_db"))
     collection_name = os.environ.get("CHROMA_COLLECTION", "day10_kb")
     model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
-    client = chromadb.PersistentClient(path=db_path)
-    emb = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
-    col = client.get_collection(name=collection_name, embedding_function=emb)
+    try:
+        client = chromadb.PersistentClient(path=db_path)
+        emb = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
+        col = client.get_collection(name=collection_name, embedding_function=emb)
+    except Exception as e:
+        print(f"Collection error: {e}", file=sys.stderr)
+        return 2
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
