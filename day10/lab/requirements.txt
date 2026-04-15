@@ -1,4 +1,4 @@
-# Day 10 Lab — Data Pipeline & Observability
+# Day 10 Lab - Data Pipeline and Observability
 # pip install -r requirements.txt
 
 python-dotenv>=1.0.0
