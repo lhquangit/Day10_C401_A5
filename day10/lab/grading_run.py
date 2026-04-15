@@ -21,6 +21,12 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parent
 
 
+def _missing_questions_message(path: Path) -> str:
+    if path.name == "grading_questions.json":
+        return f"grading question set chưa được public hoặc thiếu file: {path}"
+    return f"questions not found: {path}"
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -42,14 +48,32 @@ def main() -> int:
         return 1
 
     qpath = Path(args.questions)
+    if not qpath.is_file():
+        print(_missing_questions_message(qpath), file=sys.stderr)
+        return 1
+
     qs = json.loads(qpath.read_text(encoding="utf-8"))
     db_path = os.environ.get("CHROMA_DB_PATH", str(ROOT / "chroma_db"))
     collection_name = os.environ.get("CHROMA_COLLECTION", "day10_kb")
     model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
-    client = chromadb.PersistentClient(path=db_path)
-    emb = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
-    col = client.get_collection(name=collection_name, embedding_function=emb)
+    try:
+        client = chromadb.PersistentClient(path=db_path)
+        emb = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
+        col = client.get_collection(name=collection_name, embedding_function=emb)
+    except Exception as e:
+        print(f"Collection error: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        collection_count = col.count()
+    except Exception:
+        collection_count = -1
+    if collection_count == 0:
+        print(
+            f"WARN: collection '{collection_name}' đang rỗng tại {db_path}; grading output có thể chỉ phản ánh index trống.",
+            file=sys.stderr,
+        )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +101,7 @@ def main() -> int:
                 "contains_expected": ok_any,
                 "hits_forbidden": bad_forb,
                 "top1_doc_matches": top1_ok if want_top1 else None,
+                "retrieved_docs_count": len(docs),
                 "top_k_used": args.top_k,
                 "grading_criteria": q.get("grading_criteria", []),
             }

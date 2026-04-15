@@ -25,7 +25,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from monitoring.freshness_check import check_manifest_freshness
+from monitoring.freshness_check import check_manifest_freshness, parse_iso
 from quality.expectations import run_expectations
 from transform.cleaning_rules import clean_rows, load_raw_csv, write_cleaned_csv, write_quarantine_csv
 
@@ -44,6 +44,43 @@ def _log(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def _path_for_manifest(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _latest_exported_at(rows: list[dict[str, object]]) -> str:
+    latest_dt = None
+    for row in rows:
+        raw = str(row.get("exported_at") or "").strip()
+        dt = parse_iso(raw)
+        if dt is None:
+            continue
+        if latest_dt is None or dt > latest_dt:
+            latest_dt = dt
+    return latest_dt.isoformat() if latest_dt is not None else ""
+
+
+def _failed_expectations(results) -> list[dict[str, str]]:
+    return [
+        {
+            "name": r.name,
+            "severity": r.severity,
+            "detail": r.detail,
+        }
+        for r in results
+        if not r.passed
+    ]
+
+
+def _write_manifest(run_id: str, manifest: dict[str, object]) -> Path:
+    man_path = MAN_DIR / f"manifest_{run_id.replace(':', '-')}.json"
+    man_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return man_path
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -77,14 +114,38 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     log(f"cleaned_records={len(cleaned)}")
     log(f"quarantine_records={len(quarantine)}")
-    log(f"cleaned_csv={cleaned_path.relative_to(ROOT)}")
-    log(f"quarantine_csv={quar_path.relative_to(ROOT)}")
+    log(f"cleaned_csv={_path_for_manifest(cleaned_path)}")
+    log(f"quarantine_csv={_path_for_manifest(quar_path)}")
 
     results, halt = run_expectations(cleaned)
     for r in results:
         sym = "OK" if r.passed else "FAIL"
         log(f"expectation[{r.name}] {sym} ({r.severity}) :: {r.detail}")
+    manifest = {
+        "run_id": run_id,
+        "run_timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "pending",
+        "raw_path": _path_for_manifest(raw_path),
+        "raw_records": raw_count,
+        "cleaned_records": len(cleaned),
+        "quarantine_records": len(quarantine),
+        "latest_exported_at": _latest_exported_at(cleaned),
+        "no_refund_fix": bool(args.no_refund_fix),
+        "skipped_validate": bool(args.skip_validate and halt),
+        "validation_halt": bool(halt),
+        "failed_expectations": _failed_expectations(results),
+        "cleaned_csv": _path_for_manifest(cleaned_path),
+        "quarantine_csv": _path_for_manifest(quar_path),
+        "chroma_path": os.environ.get("CHROMA_DB_PATH", "./chroma_db"),
+        "chroma_collection": os.environ.get("CHROMA_COLLECTION", "day10_kb"),
+    }
     if halt and not args.skip_validate:
+        manifest["status"] = "failed_validation"
+        manifest["freshness_status"] = "not_checked_due_to_failed_validation"
+        manifest["freshness_detail"] = {"reason": "validation_halt"}
+        man_path = _write_manifest(run_id, manifest)
+        log(f"manifest_written={_path_for_manifest(man_path)}")
+        log("freshness_check=SKIP {\"reason\": \"validation_halt\"}")
         log("PIPELINE_HALT: expectation suite failed (halt).")
         return 2
     if halt and args.skip_validate:
@@ -97,31 +158,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         log=log,
     )
     if not embed_ok:
+        manifest["status"] = "embed_failed"
+        manifest["freshness_status"] = "not_checked_due_to_embed_failure"
+        manifest["freshness_detail"] = {"reason": "embed_failed"}
+        man_path = _write_manifest(run_id, manifest)
+        log(f"manifest_written={_path_for_manifest(man_path)}")
+        log("freshness_check=SKIP {\"reason\": \"embed_failed\"}")
         return 3
 
-    latest_exported = ""
-    if cleaned:
-        latest_exported = max((r.get("exported_at") or "" for r in cleaned), default="")
-
-    manifest = {
-        "run_id": run_id,
-        "run_timestamp": datetime.now(timezone.utc).isoformat(),
-        "raw_path": str(raw_path.relative_to(ROOT)),
-        "raw_records": raw_count,
-        "cleaned_records": len(cleaned),
-        "quarantine_records": len(quarantine),
-        "latest_exported_at": latest_exported,
-        "no_refund_fix": bool(args.no_refund_fix),
-        "skipped_validate": bool(args.skip_validate and halt),
-        "cleaned_csv": str(cleaned_path.relative_to(ROOT)),
-        "chroma_path": os.environ.get("CHROMA_DB_PATH", "./chroma_db"),
-        "chroma_collection": os.environ.get("CHROMA_COLLECTION", "day10_kb"),
-    }
-    man_path = MAN_DIR / f"manifest_{run_id.replace(':', '-')}.json"
-    man_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"manifest_written={man_path.relative_to(ROOT)}")
+    manifest["status"] = "published_with_validation_skipped" if halt else "success"
+    man_path = _write_manifest(run_id, manifest)
+    log(f"manifest_written={_path_for_manifest(man_path)}")
 
     status, fdetail = check_manifest_freshness(man_path, sla_hours=float(os.environ.get("FRESHNESS_SLA_HOURS", "24")))
+    manifest["freshness_status"] = status
+    manifest["freshness_detail"] = fdetail
+    _write_manifest(run_id, manifest)
     log(f"freshness_check={status} {json.dumps(fdetail, ensure_ascii=False)}")
 
     log("PIPELINE_OK")
@@ -152,10 +204,12 @@ def cmd_embed_internal(cleaned_csv: Path, *, run_id: str, log) -> bool:
     col = client.get_or_create_collection(name=collection_name, embedding_function=emb)
 
     ids = [r["chunk_id"] for r in rows]
+    existing_count = 0
     # Tránh “mồi cũ” trong top-k: xóa id không còn trong cleaned run này (index = snapshot publish).
     try:
         prev = col.get(include=[])
         prev_ids = set(prev.get("ids") or [])
+        existing_count = len(prev_ids)
         drop = sorted(prev_ids - set(ids))
         if drop:
             col.delete(ids=drop)
@@ -173,7 +227,10 @@ def cmd_embed_internal(cleaned_csv: Path, *, run_id: str, log) -> bool:
     ]
     # Idempotent: upsert theo chunk_id
     col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+    final_count = col.count()
+    log(f"embed_existing_count={existing_count}")
     log(f"embed_upsert count={len(ids)} collection={collection_name}")
+    log(f"embed_final_count={final_count}")
     return True
 
 
