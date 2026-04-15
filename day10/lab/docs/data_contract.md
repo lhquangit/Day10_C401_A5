@@ -6,21 +6,25 @@
 
 ## 1. Nguồn dữ liệu (source map)
 
+
 | Nguồn | Phương thức ingest | Failure mode chính | Metric / alert |
-|-------|-------------------|-------------------|----------------|
-| … | … | … | … |
+| ----- | ------------------ | ------------------ | -------------- |
+| …     | …                  | …                  | …              |
+
 
 ---
 
 ## 2. Schema cleaned
 
-| Cột | Kiểu | Bắt buộc | Ghi chú |
-|-----|------|----------|---------|
-| chunk_id | string | Có | … |
-| doc_id | string | Có | … |
-| chunk_text | string | Có | … |
-| effective_date | date | Có | … |
-| exported_at | datetime | Có | … |
+
+| Cột            | Kiểu     | Bắt buộc | Ghi chú |
+| -------------- | -------- | -------- | ------- |
+| chunk_id       | string   | Có       | …       |
+| doc_id         | string   | Có       | …       |
+| chunk_text     | string   | Có       | …       |
+| effective_date | date     | Có       | …       |
+| exported_at    | datetime | Có       | …       |
+
 
 ---
 
@@ -33,3 +37,4 @@
 ## 4. Phiên bản & canonical
 
 > Source of truth cho policy refund: file nào / version nào?
+
