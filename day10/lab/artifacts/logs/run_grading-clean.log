@@ -1,0 +1,25 @@
+run_id=grading-clean
+raw_records=10
+cleaned_records=5
+quarantine_records=5
+cleaned_csv=artifacts/cleaned/cleaned_grading-clean.csv
+quarantine_csv=artifacts/quarantine/quarantine_grading-clean.csv
+expectation[min_one_row] OK (halt) :: cleaned_rows=5
+expectation[no_empty_doc_id] OK (halt) :: empty_doc_id_rows=0
+expectation[allowed_doc_ids_only] OK (halt) :: invalid_doc_ids=[]
+expectation[refund_no_stale_14d_window] OK (halt) :: violating_rows=0
+expectation[chunk_min_length_8] OK (warn) :: short_chunk_rows=0
+expectation[effective_date_valid_iso_yyyy_mm_dd] OK (halt) :: invalid_effective_dates=[]
+expectation[hr_leave_no_stale_10d_annual] OK (halt) :: violating_rows=0
+expectation[exported_at_valid_iso_datetime] OK (halt) :: invalid_exported_at_values=[]
+expectation[critical_doc_presence] OK (halt) :: missing_doc_ids=[]
+expectation[business_anchor_per_doc] OK (halt) :: missing_anchor_doc_ids=[]
+expectation[no_duplicate_chunk_text] OK (warn) :: unique_duplicate_texts=0
+expectation[allowed_doc_ids_only] OK (halt) :: invalid_doc_rows=0
+expectation[mandatory_exported_at] OK (halt) :: missing_exported_at=0
+embed_existing_count=4
+embed_upsert count=5 collection=day10_kb
+embed_final_count=5
+manifest_written=artifacts/manifests/manifest_grading-clean.json
+freshness_check=FAIL {"checked_boundary": "latest_exported_at", "timestamp_used": "2026-04-10T08:00:00+00:00", "age_hours": 122.064, "sla_hours": 24.0, "manifest_status": "success", "fallback_used": false, "status_reason": "freshness_sla_exceeded", "reason": "freshness_sla_exceeded"}
+PIPELINE_OK

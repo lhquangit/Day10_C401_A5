@@ -1,68 +1,137 @@
 # Data contract — Lab Day 10
 
-> Bắt đầu từ `contracts/data_contract.yaml` — mở rộng và đồng bộ file này.
-> **Owner:** Nguyễn Hải — Ingestion Owner (Sprint 1)
+> File này diễn giải lại [data_contract.yaml](/Users/quanliver/Projects/AI_Vin_Learner/Lecture-Day-08-09-10/day10/lab/contracts/data_contract.yaml) theo góc nhìn vận hành: nguồn vào nào được tin, cleaned schema là gì, record nào bị quarantine, và ai chịu trách nhiệm khi contract bị lệch.
+
+**Owner:** Ingestion / Data Pipeline Owner  
+**Dataset:** `kb_chunk_export`  
+**Collection publish:** `day10_kb`
 
 ---
 
-## 1. Nguồn dữ liệu (source map)
+## 1. Source map
 
+| Nguồn | Vai trò | Cách dùng trong pipeline | Failure mode chính |
+|-------|---------|--------------------------|-------------------|
+| `data/raw/policy_export_dirty.csv` | Raw export đầu vào | Được `load_raw_csv()` đọc trực tiếp trong `etl_pipeline.py run` | duplicate, missing field, stale version, unknown `doc_id`, format ngày không chuẩn |
+| `data/docs/*.txt` | Canonical reference | Không embed trực tiếp trong baseline; dùng để đối chiếu source of truth khi viết rule / expectation / report | version drift giữa export và canonical |
+| `artifacts/cleaned/*.csv` | Cleaned snapshot | Input cho bước embed vào Chroma | có thể thiếu doc/fact nếu cleaning quá tay |
+| `artifacts/manifests/*.json` | Metadata của run | Input cho monitoring / freshness / runbook | freshness fail, failed validation, skipped publish |
 
-| Nguồn | Phương thức ingest | Failure mode chính | Metric / alert |
-|-------|-------------------|-------------------|----------------|
-| **policy_export_dirty.csv** — Export CSV từ hệ thống quản lý chính sách nội bộ (Policy Management System). Chứa chunk text đã split sẵn từ các tài liệu policy, SLA, IT FAQ, HR. | Batch CSV export → `load_raw_csv()` đọc file vào list of dict. Đường dẫn mặc định: `data/raw/policy_export_dirty.csv`. Trigger: manual hoặc schedule theo sprint. | **1) Duplicate rows:** Cùng chunk_text xuất hiện nhiều lần do export lặp (ví dụ: row 1 & 2 cùng nội dung "7 ngày làm việc"). **2) Missing fields:** `chunk_text` hoặc `effective_date` rỗng (row 5). **3) Unknown doc_id:** Export kéo nhầm catalog ngoài allowlist (ví dụ: `legacy_catalog_xyz_zzz`). | `raw_records` — tổng dòng đọc được; `quarantine_records` — dòng bị loại; alert nếu `quarantine_records / raw_records > 30%`. |
-| **data/docs/*.txt** — 5 tài liệu gốc text thuần (policy_refund_v4, sla_p1_2026, it_helpdesk_faq, hr_leave_policy, access_control_sop). Đây là **canonical source of truth** được dùng để đối chiếu khi cleaning. | Tải trực tiếp từ repo / shared drive. Các file `.txt` là reference — CSV export được so sánh ngược lại với nội dung canonical để phát hiện stale data. | **1) Stale version conflict:** CSV chứa nội dung HR bản 2025 (10 ngày phép) trong khi canonical đã cập nhật lên 12 ngày phép 2026 → `effective_date < 2026-01-01` bị quarantine. **2) Stale refund window:** Policy refund v3 ghi "14 ngày làm việc" nhưng v4 canonical là "7 ngày" → cần rule fix `14→7`. **3) Date format inconsistency:** Một số dòng export dùng DD/MM/YYYY thay vì ISO YYYY-MM-DD. | `cleaned_records` — dòng pass sau clean; expectation `refund_no_stale_14d_window` halt nếu còn chunk "14 ngày" sau fix; `hr_leave_no_stale_10d_annual` halt nếu còn chunk "10 ngày phép năm". |
+**Ý nghĩa source map**
 
-### Chi tiết failure mode & metric tóm tắt
-
-| # | Failure Mode | Ảnh hưởng | Metric giám sát | Ngưỡng alert |
-|---|-------------|-----------|-----------------|-------------|
-| 1 | Duplicate chunk_text | Vector store chứa vector trùng → retrieval trả kết quả lặp, tốn resource | `duplicate_quarantined` (count) | > 0 là cần review |
-| 2 | Missing effective_date / chunk_text | Không xác định version → embed sai hoặc thiếu nội dung | `missing_field_quarantined` | > 0 → pipeline ghi log warn |
-| 3 | Unknown doc_id (ngoài allowlist) | Chunk từ nguồn lạ lọt vào KB → agent trả lời sai context | `unknown_doc_id_quarantined` | > 0 → review allowlist |
-| 4 | Stale HR version (effective_date < 2026-01-01) | Thông tin phép cũ (10 ngày) conflict với chính sách mới (12 ngày) | `stale_hr_quarantined` | expectation halt |
-| 5 | Stale refund window (14 ngày thay vì 7 ngày) | Agent trả lời sai cửa sổ hoàn tiền cho khách hàng | expectation `refund_no_stale_14d_window` | halt pipeline |
-| 6 | Date format không chuẩn (DD/MM/YYYY) | Parse fail → quarantine nếu không normalize | `date_format_normalized` (count) | warn nếu > 20% dòng cần normalize |
+- `data/raw` là thứ pipeline xử lý thật
+- `data/docs` là nguồn chuẩn để kiểm tra version/fact
+- `artifacts/*` là evidence để chấm bài và debug
 
 ---
 
 ## 2. Schema cleaned
 
-| Cột | Kiểu | Bắt buộc | Ghi chú |
-|-----|------|----------|---------|
-| chunk_id | string | Có | ID ổn định — hash SHA256 của `doc_id|chunk_text|seq`, prefix `doc_id_seq_`. Dùng làm Chroma upsert key. |
-| doc_id | string | Có | Phải thuộc allowlist: `policy_refund_v4`, `sla_p1_2026`, `it_helpdesk_faq`, `hr_leave_policy`. |
-| chunk_text | string | Có | Nội dung chunk ≥ 8 ký tự. Sau clean có thể gắn tag `[cleaned: stale_refund_window]`. |
-| effective_date | date | Có | Chuẩn ISO `YYYY-MM-DD`. Mọi format khác (DD/MM/YYYY) được normalize trước khi ghi. |
-| exported_at | datetime | Có | Timestamp export gốc từ hệ nguồn. Dùng cho freshness check (SLA 24h). |
+| Cột | Kiểu | Bắt buộc | Mô tả |
+|-----|------|----------|-------|
+| `chunk_id` | string | Có | ID ổn định từ `doc_id + effective_date + normalized chunk_text`; dùng làm Chroma upsert key |
+| `doc_id` | string | Có | Phải thuộc allowlist |
+| `chunk_text` | string | Có | Nội dung chunk sau clean; có thể được sửa business fact như refund `14 -> 7` |
+| `effective_date` | date | Có | Chuẩn ISO `YYYY-MM-DD` sau normalize |
+| `exported_at` | datetime | Có | Timestamp export gốc; dùng cho freshness |
+
+**Allowlist hiện tại**
+
+- `policy_refund_v4`
+- `sla_p1_2026`
+- `it_helpdesk_faq`
+- `hr_leave_policy`
+
+Nguồn truth của allowlist trong code là [cleaning_rules.py](/Users/quanliver/Projects/AI_Vin_Learner/Lecture-Day-08-09-10/day10/lab/transform/cleaning_rules.py), và được phản chiếu trong [data_contract.yaml](/Users/quanliver/Projects/AI_Vin_Learner/Lecture-Day-08-09-10/day10/lab/contracts/data_contract.yaml).
 
 ---
 
-## 3. Quy tắc quarantine vs drop
+## 3. Quy tắc quarantine
 
-> **Quarantine** (không drop): Tất cả record bị flag đều được ghi vào `artifacts/quarantine/quarantine_<run_id>.csv` kèm cột `reason`.
-> Không có record nào bị **drop** hoàn toàn — mọi dòng đều có traceability.
->
-> **Reasons:**
-> - `unknown_doc_id` — doc_id không thuộc allowlist
-> - `missing_effective_date` — effective_date rỗng
-> - `invalid_effective_date_format` — không parse được ngày
-> - `stale_hr_policy_effective_date` — HR cũ (< 2026-01-01)
-> - `missing_chunk_text` — chunk_text rỗng
-> - `duplicate_chunk_text` — trùng nội dung (giữ bản đầu)
->
-> **Ai approve merge lại?** Ingestion Owner (Nguyễn Hải) review quarantine CSV. Nếu dòng bị quarantine sai (ví dụ allowlist thiếu doc_id mới), cập nhật `ALLOWED_DOC_IDS` trong `cleaning_rules.py` và re-run pipeline.
+Pipeline không drop record một cách im lặng. Mọi row không đủ điều kiện publish đều được ghi vào `artifacts/quarantine/quarantine_<run_id>.csv` cùng `reason`.
+
+**Các reason chính trong code hiện tại**
+
+- `unknown_doc_id`
+- `missing_effective_date`
+- `invalid_effective_date_format`
+- `invalid_effective_date_value`
+- `missing_exported_at`
+- `invalid_exported_at_format`
+- `stale_hr_policy_effective_date`
+- `stale_hr_policy_content`
+- `stale_source_marker`
+- `missing_chunk_text`
+- `low_text_quality`
+- `duplicate_chunk_text`
+
+**Triết lý của nhóm**
+
+- `quarantine` khi record sai rõ ràng hoặc nghi ngờ cao
+- không cho record bẩn đi vào Chroma
+- vẫn giữ evidence để debug và để chứng minh metric impact trong report
 
 ---
 
-## 4. Phiên bản & canonical
+## 4. Versioning & canonical source
 
-> **Source of truth cho policy refund:**
-> - File canonical: `data/docs/policy_refund_v4.txt` — version 4, cửa sổ hoàn tiền = **7 ngày làm việc**.
-> - CSV export có thể chứa nội dung v3 cũ ("14 ngày") do lỗi migration → pipeline rule tự động fix `14→7` khi `apply_refund_window_fix=True`.
->
-> **Source of truth cho HR leave:**
-> - File canonical: `data/docs/hr_leave_policy.txt` — chính sách 2026, **12 ngày phép năm**.
-> - Bản HR 2025 (10 ngày phép) bị quarantine dựa trên `effective_date < 2026-01-01`.
->
-> **Versioning rule:** Cutoff date `hr_leave_min_effective_date: 2026-01-01` được định nghĩa trong `contracts/data_contract.yaml`. Có thể mở rộng sang env variable để tránh hard-code.
+**Refund policy**
+
+- Canonical fact: `7 ngày làm việc`
+- Raw export có thể chứa chunk stale `14 ngày làm việc`
+- Rule hiện tại:
+  - stale row có marker nguồn cũ sẽ bị quarantine
+  - refund row hợp lệ có anomaly `14 ngày` có thể được fix về `7 ngày` nếu không bật `--no-refund-fix`
+
+**HR leave policy**
+
+- Canonical fact: chính sách 2026 là `12 ngày phép năm`
+- Raw export có row cũ `10 ngày phép năm (bản HR 2025)`
+- Rule hiện tại:
+  - quarantine nếu `effective_date < 2026-01-01`
+  - quarantine nếu text chứa marker HR stale
+
+**SLA và IT FAQ**
+
+- `sla_p1_2026` là nguồn đúng cho fact `15 phút` / `4 giờ`
+- `it_helpdesk_faq` là nguồn đúng cho fact `5 lần đăng nhập sai`
+
+---
+
+## 5. SLA & monitoring
+
+Theo [data_contract.yaml](/Users/quanliver/Projects/AI_Vin_Learner/Lecture-Day-08-09-10/day10/lab/contracts/data_contract.yaml), freshness hiện được đo với:
+
+- boundary: `publish`
+- `sla_hours=24`
+
+Trong code hiện tại, manifest lưu `latest_exported_at` và `freshness_check.py` so sánh timestamp này với thời điểm kiểm tra để trả `PASS/WARN/FAIL`.
+
+Lưu ý:
+
+- Data mẫu của lab có `exported_at` cũ, nên `FAIL` freshness là hợp lý
+- `FAIL` freshness không có nghĩa cleaning sai; nó chỉ nói snapshot nguồn đã cũ hơn SLA
+
+---
+
+## 6. Owner & quy trình thay đổi contract
+
+Khi thêm `doc_id` mới hoặc thay đổi schema cleaned, nhóm phải đồng bộ ít nhất 3 nơi:
+
+1. [cleaning_rules.py](/Users/quanliver/Projects/AI_Vin_Learner/Lecture-Day-08-09-10/day10/lab/transform/cleaning_rules.py)
+2. [expectations.py](/Users/quanliver/Projects/AI_Vin_Learner/Lecture-Day-08-09-10/day10/lab/quality/expectations.py)
+3. [data_contract.yaml](/Users/quanliver/Projects/AI_Vin_Learner/Lecture-Day-08-09-10/day10/lab/contracts/data_contract.yaml)
+
+Nếu không đồng bộ, dễ xảy ra drift:
+
+- cleaning quarantine nhầm doc hợp lệ
+- expectation halt sai
+- report không khớp với repo
+
+---
+
+## 7. Rủi ro còn lại
+
+- `policy_versioning.hr_leave_min_effective_date` vẫn là cutoff cố định
+- canonical docs chưa được ingest trực tiếp; baseline vẫn phụ thuộc raw export
+- expectation suite còn vài rule legacy trùng vai trò và nên dọn để contract rõ hơn

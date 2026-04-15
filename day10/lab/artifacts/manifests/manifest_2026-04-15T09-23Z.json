@@ -1,0 +1,29 @@
+{
+  "run_id": "2026-04-15T09-23Z",
+  "run_timestamp": "2026-04-15T09:23:44.586453+00:00",
+  "status": "success",
+  "raw_path": "data/raw/policy_export_dirty.csv",
+  "raw_records": 10,
+  "cleaned_records": 5,
+  "quarantine_records": 5,
+  "latest_exported_at": "2026-04-10T08:00:00+00:00",
+  "no_refund_fix": false,
+  "skipped_validate": false,
+  "validation_halt": false,
+  "failed_expectations": [],
+  "cleaned_csv": "artifacts/cleaned/cleaned_2026-04-15T09-23Z.csv",
+  "quarantine_csv": "artifacts/quarantine/quarantine_2026-04-15T09-23Z.csv",
+  "chroma_path": "./chroma_db",
+  "chroma_collection": "day10_kb",
+  "freshness_status": "FAIL",
+  "freshness_detail": {
+    "checked_boundary": "latest_exported_at",
+    "timestamp_used": "2026-04-10T08:00:00+00:00",
+    "age_hours": 121.399,
+    "sla_hours": 24.0,
+    "manifest_status": "success",
+    "fallback_used": false,
+    "status_reason": "freshness_sla_exceeded",
+    "reason": "freshness_sla_exceeded"
+  }
+}

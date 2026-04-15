@@ -1,0 +1,40 @@
+{
+  "run_id": "inject-hr-missing-skip",
+  "run_timestamp": "2026-04-15T09:55:39.328704+00:00",
+  "status": "published_with_validation_skipped",
+  "raw_path": "data/raw/policy_export_inject_hr_missing.csv",
+  "raw_records": 10,
+  "cleaned_records": 4,
+  "quarantine_records": 6,
+  "latest_exported_at": "2026-04-10T08:00:00+00:00",
+  "no_refund_fix": false,
+  "skipped_validate": true,
+  "validation_halt": true,
+  "failed_expectations": [
+    {
+      "name": "critical_doc_presence",
+      "severity": "halt",
+      "detail": "missing_doc_ids=['hr_leave_policy']"
+    },
+    {
+      "name": "business_anchor_per_doc",
+      "severity": "halt",
+      "detail": "missing_anchor_doc_ids=['hr_leave_policy']"
+    }
+  ],
+  "cleaned_csv": "artifacts/cleaned/cleaned_inject-hr-missing-skip.csv",
+  "quarantine_csv": "artifacts/quarantine/quarantine_inject-hr-missing-skip.csv",
+  "chroma_path": "./chroma_db",
+  "chroma_collection": "day10_kb",
+  "freshness_status": "FAIL",
+  "freshness_detail": {
+    "checked_boundary": "latest_exported_at",
+    "timestamp_used": "2026-04-10T08:00:00+00:00",
+    "age_hours": 121.932,
+    "sla_hours": 24.0,
+    "manifest_status": "published_with_validation_skipped",
+    "fallback_used": false,
+    "status_reason": "freshness_sla_exceeded",
+    "reason": "freshness_sla_exceeded"
+  }
+}
