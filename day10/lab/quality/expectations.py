@@ -112,5 +112,57 @@ def run_expectations(cleaned_rows: List[Dict[str, Any]]) -> Tuple[List[Expectati
         )
     )
 
+    # ---------------------------------------------------------
+    # PHẦN LÀM THÊM CỦA NHÓM (SPRINT 2 - QUALITY OWNER)
+    # ---------------------------------------------------------
+
+    # E7: Không có chunk_text trùng lặp (Theo schema quality_rules: no_duplicate_chunk_text)
+    # Trùng lặp có thể gây nhiễu cho Vector DB, nhưng đôi khi là text boilerplate nên chỉ để "warn"
+    seen_texts = set()
+    duplicate_texts = set()
+    for r in cleaned_rows:
+        txt = (r.get("chunk_text") or "").strip()
+        if txt:
+            if txt in seen_texts:
+                duplicate_texts.add(txt)
+            else:
+                seen_texts.add(txt)
+    ok7 = len(duplicate_texts) == 0
+    results.append(
+        ExpectationResult(
+            "no_duplicate_chunk_text",
+            ok7,
+            "warn",  # Quyết định kỹ thuật: Chỉ cảnh báo để không block pipeline nếu trùng format
+            f"unique_duplicate_texts={len(duplicate_texts)}",
+        )
+    )
+
+    # E8: doc_id phải nằm trong allowlist của Data Contract
+    # Tránh việc ingest nhầm rác hoặc "doc_id lạ" vào RAG làm ảo giác Agent.
+    allowed_docs = {"policy_refund_v4", "sla_p1_2026", "it_helpdesk_faq", "hr_leave_policy"}
+    invalid_docs = [r for r in cleaned_rows if r.get("doc_id") not in allowed_docs]
+    ok8 = len(invalid_docs) == 0
+    results.append(
+        ExpectationResult(
+            "allowed_doc_ids_only",
+            ok8,
+            "halt",  # Quyết định kỹ thuật: Lỗi nghiêm trọng, phải dừng vì sẽ sinh rác trong VectorDB
+            f"invalid_doc_rows={len(invalid_docs)}",
+        )
+    )
+
+    # E9: Schema bắt buộc phải có exported_at theo như data_contract.yaml
+    missing_exported_at = [r for r in cleaned_rows if not r.get("exported_at")]
+    ok9 = len(missing_exported_at) == 0
+    results.append(
+        ExpectationResult(
+            "mandatory_exported_at",
+            ok9,
+            "halt",
+            f"missing_exported_at={len(missing_exported_at)}",
+        )
+    )
+
+    # Tính toán trạng thái halt tổng
     halt = any(not r.passed and r.severity == "halt" for r in results)
     return results, halt
